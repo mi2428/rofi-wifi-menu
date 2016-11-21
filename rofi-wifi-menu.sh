@@ -13,13 +13,15 @@ cd $(dirname $0)
 . "$SUBR_DIR/wpa"
 . "$SUBR_DIR/rfkill"
 
+declare -a PROFILES ESSIDS
+
 _rofi() {
 	rofi -dmenu -width 720 -lines 20 "$@"
 }
 
 rofi_menu() {
 	local mesg="$1" entries="$2" prompt="$3"
-	printf "$(echo -e "$entries" | _rofi -mesg "$mesg" -p "$prompt")"
+	printf "%s" "$(echo -e "$entries" | _rofi -mesg "$mesg" -p "$prompt")"
 }
 
 check_env() {
@@ -38,9 +40,38 @@ check_env() {
 	return 0
 }
 
+_parse_wpa_config_section() {
+	local arr attr=$1 val
+	shift
+	for arr; do
+		[[ "$(printf "%q" "$arr" | awk -F= '{print $1}')" == "$attr" ]] && \
+			printf "%s" "$arr" | awk -F= '{print $2}' | sed -e "s/^\"\(.*\)\"$/\1/g" && \
+			return 0
+	done
+	return 1
+}
+
 load_profiles() {
-	local profiles=()
-	declare -ar PROFILES=$profiles
+	local i=0
+	while read -r profile; do
+		essid="$(
+			. "$PROFILE_DIR/$profile" 1> /dev/null
+			[[ "$Interface" != "$INTERFACE" ]] && return 1
+			[[ -n "${WPAConfigSection[@]}" ]] && \
+				ESSID="$(_parse_wpa_config_section "ssid" "${WPAConfigSection[@]}")"
+			[[ -n "$ESSID" ]] && \
+				printf "%s" "$ESSID" && \
+				return 0
+			return 2
+		)"
+		case $? in
+		0)
+			PROFILES[i]="$profile"
+			ESSIDS[i]="$essid"
+			(( ++i ))
+			;;
+		esac
+	done < <(list_profiles)
 }
 
 current_ssid() {
@@ -55,34 +86,40 @@ scan_ap() {
 }
 
 _ap_menu_format() {
-	local ssid="$1" signal="$2" security=$3
-	printf "%-32s %-16s %-16s" "\"$ssid\"" "$security" "$signal dBm"
+	local ssid="$1" signal="$2" security=$3 remark=$4
+	printf "%-32s %-16s %-16s %s" "\"$ssid\"" "$security" "$signal dBm" "$remark"
 }
 
 select_ap() {
 	local scan_result="$(scan_ap)"
 	local current_ssid="$(current_ssid)"
-	local menu mes item signal flags ssid security i=0
+	local menu mes i=0
 	mes="Select the network you wish to use."
-	menu+="$(printf "%-5s %s" "[A]" "Reflesh AP list\n")"
-	menu+="$(printf "%-5s %s" "[B]" "Connect to stealth AP\n")"
+	menu+="$(printf "%-5s %s" "[A]" "Reflesh AP list")"
+	menu+="\n$(printf "%-5s %s" "[B]" "Connect to stealth AP")"
 	while IFS=$'\t' read -r signal flags ssid; do
 		[[ "$flags" =~ WEP|WPA-PSK|WPA2-PSK|WPA-EAP|WPA2-EAP ]] && \
 			security="${BASH_REMATCH}" || security="OPEN"
-		menu+="$(printf "%-5s %s" "[$i]" "$(_ap_menu_format "$ssid" "$signal" $security)\n")"
+		remark="-"
+		in_array "$ssid" "${ESSIDS[@]}" && remark="saved"
+		[[ "$current_ssid" = "$ssid" ]] && remark="connected"
+		menu+="\n$(printf "%-5s %s" "[$i]" "$(_ap_menu_format "$ssid" "$signal" $security $remark)")"
 		(( ++i ))
 	done < "$scan_result"
 	printf "%s" "$(rofi_menu "$mes" "$menu" "filter: ")"
 }
 
 create_profile() {
+	local profile
 }
 
 connect_to_ap() {
-	local ssid="$1"
+	local essid="$1"
+	! in_array "$essid" "${ESSIDS[@]}" && create_profile "$essid"
 }
 
 main() {
+	load_profiles
 	while true; do
 		echo "Scanning for networks..."
 		essid="$(
